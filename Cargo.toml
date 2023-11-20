@@ -1,0 +1,11 @@
+[package]
+name = "unrar"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = "2.33"
+unrar = "0.4"
+zip = "0.5"
+chrono = "0.4"
+indicatif = "0.15.0"
