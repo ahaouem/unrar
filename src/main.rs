@@ -1,5 +1,5 @@
 use clap::{App, Arg};
-use std::fs;
+use std::{fs, thread};
 use std::process::Command;
 use std::path::{Path, PathBuf};
 use chrono::Local;
@@ -9,11 +9,12 @@ fn get_matches() -> clap::ArgMatches<'static> {
     App::new("RAR Unpacker")
         .version("1.0")
         .author("Aleksander Haouem")
-        .about("Unpacks RAR files")
+        .about("Unpacks multiple RAR files concurrently")
         .arg(
             Arg::with_name("INPUT")
-                .help("Sets the input RAR file to use")
+                .help("Sets the input RAR files to use")
                 .required(true)
+                .multiple(true)
                 .index(1),
         )
         .arg(
@@ -35,82 +36,78 @@ fn get_matches() -> clap::ArgMatches<'static> {
         .get_matches()
 }
 
-fn get_rar_file<'a>(matches: &'a clap::ArgMatches) -> &'a str {
-    matches.value_of("INPUT").unwrap_or_else(|| {
-        eprintln!("Input file not provided.");
-        std::process::exit(1);
-    })
+fn get_rar_files<'a>(matches: &'a clap::ArgMatches) -> clap::Values<'a> {
+    matches.values_of("INPUT").unwrap()
 }
+
 fn validate_rar_file(rar_file: &str) {
     if !Path::new(rar_file).exists() {
-        eprintln!("File '{}' does not exist in the current directory.", rar_file);
+        eprintln!("File '{}' does not exist.", rar_file);
         std::process::exit(1);
     }
 }
 
 fn create_temp_dir(output_dir: &str) -> PathBuf {
-    let date = Local::now().format("%Y-%m-%d_%H-%M").to_string();
+    let date = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
     let temp_dir = PathBuf::from(format!("{}/{}", output_dir, date));
 
     if let Err(e) = fs::create_dir_all(&temp_dir) {
-        eprintln!("Failed to create unique temp directory: {}", e);
+        eprintln!("Failed to create directory: {}", e);
         std::process::exit(1);
     }
 
     temp_dir
 }
 
-fn execute_unar_command(matches: &clap::ArgMatches, rar_file: &str, temp_dir: &PathBuf) {
+fn execute_unar_command(rar_file: &str, temp_dir: &PathBuf, keep_original: bool, overwrite_existing: bool) {
+    validate_rar_file(rar_file);
+
     let mut cmd = Command::new("unar");
     cmd.args(&[rar_file, "-o", temp_dir.to_str().unwrap()]);
 
-    if !matches.is_present("quiet") {
-        cmd.stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+    if overwrite_existing {
+        cmd.arg("-force-overwrite");
     }
 
-    let output = cmd.output();
+    let output = cmd.output().expect("Failed to execute unar command");
 
-    match output {
-        Ok(output) => {
-            if !output.status.success() {
-                eprintln!("Unar command did not exit successfully.");
-                std::process::exit(1);
-            }
+    if !output.status.success() {
+        eprintln!("Failed to extract '{}'", rar_file);
+    }
 
-            if !matches.is_present("keep") {
-                if let Err(e) = fs::remove_file(rar_file) {
-                    eprintln!("Failed to remove original file: {}", e);
-                }
-            }
-
-            if matches.is_present("quiet") {
-                println!("Extraction successful. Files are available in {:?}", &temp_dir);
-            }
-        }
-        Err(e) => {
-            eprintln!("Failed to execute unar command: {}", e);
-            std::process::exit(1);
+    if !keep_original {
+        if let Err(e) = fs::remove_file(rar_file) {
+            eprintln!("Failed to delete '{}': {}", rar_file, e);
         }
     }
 }
 
 fn main() {
     let matches = get_matches();
+    let rar_files = get_rar_files(&matches);
 
-    let rar_file = get_rar_file(&matches);
-    validate_rar_file(rar_file);
-
-    let output_dir = matches.value_of("output").unwrap_or("./temp");
-    let temp_dir = create_temp_dir(output_dir);
+    let keep_original = matches.is_present("keep");
+    let overwrite_existing = matches.is_present("overwrite");
 
     let start_time = Instant::now();
 
-    execute_unar_command(&matches, rar_file, &temp_dir);
+    let mut handles = vec![];
+    for rar_file in rar_files {
+        let rar_file = rar_file.to_string();
+        let output_dir = matches.value_of("output").unwrap_or("./temp").to_string();
+        let temp_dir = create_temp_dir(&output_dir);
+
+        let handle = thread::spawn(move || {
+            execute_unar_command(&rar_file, &temp_dir, keep_original, overwrite_existing);
+        });
+
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
 
     let duration = start_time.elapsed();
-    if !matches.is_present("quiet") {
-        println!("Extraction successful. Files are available in {:?}", &temp_dir);
-    }
-    println!("Executed in {:.2?} seconds", duration);
+    println!("Total execution time: {:.2?} seconds", duration);
 }
